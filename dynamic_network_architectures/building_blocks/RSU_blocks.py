@@ -6,8 +6,7 @@ from typing import Union, List, Tuple, Type, Optional
 
 from dynamic_network_architectures.building_blocks.helper import (
     maybe_convert_scalar_to_list,
-    get_matching_pool_op,
-    convert_conv_op_to_dim,
+    get_matching_pool_op
 )
 
 __author__ = ["Stefano Petraccini"]
@@ -74,7 +73,8 @@ class RSUBlock(nn.Module):
         dropout_op_kwargs: Optional[dict] = None,
         nonlin_kwargs: Optional[dict] = None,
         pool: str = "max",
-        nonlin_first: bool = False
+        nonlin_first: bool = False,
+        dilate: bool = False
     ):
         super().__init__()
         self.depth = depth
@@ -84,7 +84,7 @@ class RSUBlock(nn.Module):
         self.decoders = nn.ModuleList()
 
         # Here we define the dimensions based on the conv_op type
-        #dim = convert_conv_op_to_dim(conv_op)
+        dilation =  [2 ** i for i in range(self.depth_per_stage[depth+2])] if dilate else maybe_convert_scalar_to_list(depth, 1)
         kernel_size = maybe_convert_scalar_to_list(conv_op, kernel_size)
         self.strides = maybe_convert_scalar_to_list(conv_op, stride)
         padding = [k // 2 for k in kernel_size]
@@ -96,7 +96,7 @@ class RSUBlock(nn.Module):
         self.dropout = dropout_op(**(dropout_op_kwargs or {})) if dropout_op else nn.Identity()
 
         # Input convolution
-        self.conv_in = conv_op(in_ch, out_ch, kernel_size, stride, padding=padding, bias=bias)
+        self.conv_in = conv_op(in_ch, out_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[0])
         self.norm_in = norm_op(out_ch, **norm_op_kwargs) if norm_op else nn.Identity()
 
         # Encoder path 
@@ -104,7 +104,7 @@ class RSUBlock(nn.Module):
         self.enc_norms = nn.ModuleList()
         for i in range(depth):
             self.encoders.append(
-                conv_op(out_ch if i == 0 else mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias)
+                conv_op(out_ch if i == 0 else mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[i])
             )
             self.enc_norms.append(
                 norm_op(mid_ch, **norm_op_kwargs) if norm_op else nn.Identity()
@@ -112,7 +112,7 @@ class RSUBlock(nn.Module):
             self.pools.append(pool_op(kernel_size=2, stride=2))
 
         # Bottom
-        self.bottom = conv_op(mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias)
+        self.bottom = conv_op(mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[depth])
         self.norm_bottom = norm_op(mid_ch, **norm_op_kwargs) if norm_op else nn.Identity()
 
         # Decoder path
@@ -122,7 +122,7 @@ class RSUBlock(nn.Module):
             in_ch_dec = mid_ch + skip_ch
             out_ch_dec = mid_ch if i < depth - 1 else out_ch
             self.decoders.append(
-                conv_op(in_ch_dec, out_ch_dec, kernel_size, stride, padding=padding, bias=bias)
+                conv_op(in_ch_dec, out_ch_dec, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[depth - i - 1])
             )
             self.dec_norms.append(
                 norm_op(out_ch_dec, **norm_op_kwargs) if norm_op else nn.Identity()
@@ -359,7 +359,7 @@ class RSUEncoder(nn.Module):
         self.strides = strides
         self.return_skips = return_skips
         self.features_per_stage = features_per_stage
-        self.depth_per_stage = depth_per_stage if depth_per_stage is not None else [4] * n_stages
+        self.depth_per_stage = depth_per_stage if depth_per_stage is not None else maybe_convert_scalar_to_list(conv_op, 4)
         self.bias = conv_bias
         self.blocks_nonlin = blocks_nonlin if blocks_nonlin is not None else nonlin
         self.nonlin_first = nonlin_first
@@ -385,10 +385,54 @@ class RSUEncoder(nn.Module):
                     dropout_op_kwargs=dropout_op_kwargs,
                     nonlin_kwargs=nonlin_kwargs,
                     pool=pool,
-                    nonlin_first=nonlin_first
+                    nonlin_first=nonlin_first,
+                    dilate=True if i > depth - 2 else False
                 )
             )
             prev_ch = features_per_stage[i]
+        #     #### this is totally dumb. can we make it les pukey?
+        # self.stages.append(
+        #     RSUBlock(
+        #         in_ch=prev_ch,
+        #         out_ch=features_per_stage[depth+1],
+        #         mid_ch=features_per_stage[depth+1],
+        #         depth=self.depth_per_stage[depth+1],
+        #         conv_op=conv_op,
+        #         kernel_size=kernel_sizes[depth+1],
+        #         stride=strides[depth+1],
+        #         bias=conv_bias,
+        #         nonlin=self.blocks_nonlin,
+        #         norm_op=norm_op,
+        #         norm_op_kwargs=norm_op_kwargs,
+        #         dropout_op=dropout_op,
+        #         dropout_op_kwargs=dropout_op_kwargs,
+        #         nonlin_kwargs=nonlin_kwargs,
+        #         pool=pool,
+        #         nonlin_first=nonlin_first,
+        #         dilation=[2 ** i for i in range(self.depth_per_stage[depth+1])]
+        #     )
+        # )
+        # self.stages.append(
+        #     RSUBlock(
+        #         in_ch=features_per_stage[depth+1],
+        #         out_ch=features_per_stage[depth+2],
+        #         mid_ch=features_per_stage[depth+2],
+        #         depth=self.depth_per_stage[depth+2],
+        #         conv_op=conv_op,
+        #         kernel_size=kernel_sizes[depth+2],
+        #         stride=strides[depth+2],
+        #         bias=conv_bias,
+        #         nonlin=self.blocks_nonlin,
+        #         norm_op=norm_op,
+        #         norm_op_kwargs=norm_op_kwargs,
+        #         dropout_op=dropout_op,
+        #         dropout_op_kwargs=dropout_op_kwargs,
+        #         nonlin_kwargs=nonlin_kwargs,
+        #         pool=pool,
+        #         nonlin_first=nonlin_first,
+        #         dilation=[2 ** i for i in range(self.depth_per_stage[depth+2])]
+        #     )
+        # )
 
     def forward(self, x: torch.Tensor) -> Union[List[torch.Tensor], torch.Tensor]:
         """
@@ -480,10 +524,30 @@ class RSUDecoder(nn.Module):
 
         features_per_stage = encoder.features_per_stage
         n_stages = len(features_per_stage)
-        for i in range(n_stages-1, 0, -1):
+        self.stages.append(
+                RSUBlock(
+                    in_ch = features_per_stage[n_stages] + features_per_stage[n_stages-1],
+                    out_ch = features_per_stage[n_stages-1],
+                    mid_ch = features_per_stage[n_stages-1]//2,
+                    depth = encoder.depth_per_stage[n_stages-1],
+                    conv_op = encoder.conv_op,
+                    kernel_size = encoder.kernel_sizes[n_stages-1],
+                    stride = 1,
+                    bias = encoder.bias,
+                    nonlin = self.blocks_nonlin,
+                    norm_op = encoder.norm_op,
+                    norm_op_kwargs = encoder.norm_op_kwargs,
+                    dropout_op = encoder.dropout_op,
+                    dropout_op_kwargs = encoder.dropout_op_kwargs,
+                    nonlin_kwargs = encoder.nonlin_kwargs,
+                    nonlin_first = nonlin_first,
+                    dilate = True
+                )
+            )
+        for i in range(n_stages-2, 0, -1):
             self.stages.append(
                 RSUBlock(
-                    in_ch = features_per_stage[i]+features_per_stage[i-1],
+                    in_ch = features_per_stage[i] + features_per_stage[i-1],
                     out_ch = features_per_stage[i-1],
                     mid_ch = features_per_stage[i-1]//2,
                     depth = encoder.depth_per_stage[i-1],
