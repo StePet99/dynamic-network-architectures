@@ -88,17 +88,26 @@ class RSUBlock(nn.Module):
         self.pools = nn.ModuleList()
         self.decoders = nn.ModuleList()
 
-        # Here we define the dimensions based on the conv_op type
-        # dim = convert_conv_op_to_dim(conv_op)
-        # kernel_size = maybe_convert_scalar_to_list(conv_op, kernel_size)
-        # self.strides = maybe_convert_scalar_to_list(conv_op, stride)
+        # Convert kernel_size to list if needed
+        kernel_size = maybe_convert_scalar_to_list(conv_op, kernel_size)
+        stride = maybe_convert_scalar_to_list(conv_op, stride)
         padding = [k // 2 for k in kernel_size]
+        
+        # Set mid_ch default if None
+        if mid_ch is None:
+            mid_ch = out_ch // 2
 
         # Activation and dropout defaults
         nonlin_kwargs = {} if nonlin_kwargs is None else nonlin_kwargs
         norm_op_kwargs = {} if norm_op_kwargs is None else norm_op_kwargs
         self.nonlin = nonlin(**nonlin_kwargs) if nonlin else nn.Identity()
         self.dropout = dropout_op(**(dropout_op_kwargs or {})) if dropout_op else nn.Identity()
+
+        # Set dilation - use 1 for normal RSU, or progressive dilation if dilate=True
+        if dilate:
+            dilation = [2**i for i in range(depth + 1)]
+        else:
+            dilation = [1] * (depth + 1)
 
         # Input convolution
         self.conv_in = conv_op(in_ch, out_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[0])
@@ -109,7 +118,7 @@ class RSUBlock(nn.Module):
         self.enc_norms = nn.ModuleList()
         for i in range(depth):
             self.encoders.append(
-                conv_op(out_ch if i == 0 else mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[i])
+                conv_op(out_ch if i == 0 else mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[i+1])
             )
             self.enc_norms.append(
                 norm_op(mid_ch, **norm_op_kwargs) if norm_op else nn.Identity()
@@ -127,7 +136,7 @@ class RSUBlock(nn.Module):
             in_ch_dec = mid_ch + skip_ch
             out_ch_dec = mid_ch if i < depth - 1 else out_ch
             self.decoders.append(
-                conv_op(in_ch_dec, out_ch_dec, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[depth - i - 1])
+                conv_op(in_ch_dec, out_ch_dec, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[depth - i])
             )
             self.dec_norms.append(
                 norm_op(out_ch_dec, **norm_op_kwargs) if norm_op else nn.Identity()
@@ -727,7 +736,7 @@ class RSUEncoder(nn.Module):
                     nonlin_kwargs=nonlin_kwargs,
                     pool=pool,
                     nonlin_first=nonlin_first,
-                    dilate=True if i > depth - 2 else False
+                    dilate=False
                 )
             )
             prev_ch = features_per_stage[i]
