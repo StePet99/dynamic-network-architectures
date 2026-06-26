@@ -78,7 +78,8 @@ class RSUBlock(nn.Module):
         dropout_op_kwargs: Optional[dict] = None,
         nonlin_kwargs: Optional[dict] = None,
         pool: str = "max",
-        nonlin_first: bool = False
+        nonlin_first: bool = False,
+        dilate: bool = False
     ):
         super().__init__()
         self.depth = depth
@@ -87,11 +88,14 @@ class RSUBlock(nn.Module):
         self.pools = nn.ModuleList()
         self.decoders = nn.ModuleList()
 
-        # Here we define the dimensions based on the conv_op type
-        # dim = convert_conv_op_to_dim(conv_op)
-        # kernel_size = maybe_convert_scalar_to_list(conv_op, kernel_size)
-        # self.strides = maybe_convert_scalar_to_list(conv_op, stride)
+        # Convert kernel_size to list if needed
+        kernel_size = maybe_convert_scalar_to_list(conv_op, kernel_size)
+        stride = maybe_convert_scalar_to_list(conv_op, stride)
         padding = [k // 2 for k in kernel_size]
+        
+        # Set mid_ch default if None
+        if mid_ch is None:
+            mid_ch = out_ch // 2
 
         # Activation and dropout defaults
         nonlin_kwargs = {} if nonlin_kwargs is None else nonlin_kwargs
@@ -99,8 +103,14 @@ class RSUBlock(nn.Module):
         self.nonlin = nonlin(**nonlin_kwargs) if nonlin else nn.Identity()
         self.dropout = dropout_op(**(dropout_op_kwargs or {})) if dropout_op else nn.Identity()
 
+        # Set dilation - use 1 for normal RSU, or progressive dilation if dilate=True
+        if dilate:
+            dilation = [2**i for i in range(depth + 1)]
+        else:
+            dilation = [1] * (depth + 1)
+
         # Input convolution
-        self.conv_in = conv_op(in_ch, out_ch, kernel_size, stride, padding=padding, bias=bias)
+        self.conv_in = conv_op(in_ch, out_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[0])
         self.norm_in = norm_op(out_ch, **norm_op_kwargs) if norm_op else nn.Identity()
 
         # Encoder path 
@@ -108,7 +118,7 @@ class RSUBlock(nn.Module):
         self.enc_norms = nn.ModuleList()
         for i in range(depth):
             self.encoders.append(
-                conv_op(out_ch if i == 0 else mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias)
+                conv_op(out_ch if i == 0 else mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[i+1])
             )
             self.enc_norms.append(
                 norm_op(mid_ch, **norm_op_kwargs) if norm_op else nn.Identity()
@@ -116,7 +126,7 @@ class RSUBlock(nn.Module):
             self.pools.append(pool_op(kernel_size=2, stride=2))
 
         # Bottom
-        self.bottom = conv_op(mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias)
+        self.bottom = conv_op(mid_ch, mid_ch, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[depth])
         self.norm_bottom = norm_op(mid_ch, **norm_op_kwargs) if norm_op else nn.Identity()
 
         # Decoder path
@@ -126,7 +136,7 @@ class RSUBlock(nn.Module):
             in_ch_dec = mid_ch + skip_ch
             out_ch_dec = mid_ch if i < depth - 1 else out_ch
             self.decoders.append(
-                conv_op(in_ch_dec, out_ch_dec, kernel_size, stride, padding=padding, bias=bias)
+                conv_op(in_ch_dec, out_ch_dec, kernel_size, stride, padding=padding, bias=bias, dilation=dilation[depth - i])
             )
             self.dec_norms.append(
                 norm_op(out_ch_dec, **norm_op_kwargs) if norm_op else nn.Identity()
@@ -699,7 +709,7 @@ class RSUEncoder(nn.Module):
         self.strides = strides
         self.return_skips = return_skips
         self.features_per_stage = features_per_stage
-        self.depth_per_stage = depth_per_stage if depth_per_stage is not None else [4] * n_stages
+        self.depth_per_stage = depth_per_stage if depth_per_stage is not None else maybe_convert_scalar_to_list(conv_op, 4)
         self.bias = conv_bias
         self.blocks_nonlin = blocks_nonlin if blocks_nonlin is not None else nonlin
         self.nonlin_first = nonlin_first
@@ -725,7 +735,8 @@ class RSUEncoder(nn.Module):
                     dropout_op_kwargs=dropout_op_kwargs,
                     nonlin_kwargs=nonlin_kwargs,
                     pool=pool,
-                    nonlin_first=nonlin_first
+                    nonlin_first=nonlin_first,
+                    dilate=False
                 )
             )
             prev_ch = features_per_stage[i]
@@ -885,7 +896,7 @@ class RSUDecoder(nn.Module):
         for i in range(n_stages-2, 0, -1):
             self.stages.append(
                 RSUBlock(
-                    in_ch = features_per_stage[i]+features_per_stage[i-1],
+                    in_ch = features_per_stage[i] + features_per_stage[i-1],
                     out_ch = features_per_stage[i-1],
                     mid_ch = features_per_stage[i-1]//2,
                     depth = encoder.depth_per_stage[i-1],
