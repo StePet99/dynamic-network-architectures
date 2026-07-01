@@ -77,6 +77,21 @@ def _compute_sequential_max_size(module: nn.Module, input_size: Union[List[int],
 
 
 def estimate_cost_from_flops(flops_per_sample: int, batch_size: int = 1) -> dict:
+    """
+    Convert per-sample FLOPs into a small cost summary.
+
+    Parameters
+    ----------
+    flops_per_sample : int
+        Approximate FLOPs for one sample.
+    batch_size : int, default=1
+        Batch size used to scale per-sample estimates.
+
+    Returns
+    -------
+    dict
+        Dictionary with FLOPs and MACs per sample and per batch.
+    """
     flops_per_sample = int(flops_per_sample)
     batch_size = int(batch_size)
     flops_per_batch = int(flops_per_sample * batch_size)
@@ -90,7 +105,16 @@ def estimate_cost_from_flops(flops_per_sample: int, batch_size: int = 1) -> dict
 
 
 class LayerNormNd(nn.Module):
-    """Channel-wise LayerNorm for channels-first N-D tensors."""
+    """
+    Channel-wise LayerNorm for channels-first N-D tensors.
+
+    Parameters
+    ----------
+    num_channels : int
+        Number of channels in the input tensor.
+    eps : float, default=1e-6
+        Numerical stability term.
+    """
 
     def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
         super().__init__()
@@ -108,6 +132,23 @@ class LayerNormNd(nn.Module):
 
 
 class WindowAttention(nn.Module):
+    """
+    Window-based multi-head self-attention for flattened local windows.
+
+    Parameters
+    ----------
+    dim : int
+        Input feature dimension.
+    num_heads : int
+        Number of attention heads.
+    qkv_bias : bool, default=True
+        If True, add bias to QKV projections.
+    attn_drop : float, default=0.0
+        Dropout applied to attention weights.
+    proj_drop : float, default=0.0
+        Dropout applied to the output projection.
+    """
+
     def __init__(
         self,
         dim: int,
@@ -131,6 +172,19 @@ class WindowAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply window attention to a batch of flattened windows.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tensor of shape (num_windows, window_volume, channels).
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor with the same shape as the input.
+        """
         b_windows, n_tokens, channels = x.shape
         qkv = self.qkv(x).reshape(b_windows, n_tokens, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
@@ -146,6 +200,21 @@ class WindowAttention(nn.Module):
         return x
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]], window_size: Tuple[int, ...]) -> int:
+        """
+        Estimate the approximate FLOPs for attention over a spatial input.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+        window_size : tuple
+            Local attention window size.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for the attention module.
+        """
         padded_shape = [int(math.ceil(i / w) * w) for i, w in zip(input_size, window_size)]
         windows_per_sample = int(np.prod([p // w for p, w in zip(padded_shape, window_size)], dtype=np.int64))
         window_volume = int(np.prod(window_size, dtype=np.int64))
@@ -220,6 +289,31 @@ def _window_reverse_nd(
 
 
 class SwinLiteBlock(nn.Module):
+    """
+    Swin transformer block with optional shifted windows and MLP.
+
+    Parameters
+    ----------
+    dim : int
+        Feature dimension.
+    num_heads : int
+        Number of attention heads.
+    window_size : tuple of int
+        Spatial window size used for attention.
+    shift_size : tuple of int
+        Cyclic shift applied before partitioning into windows.
+    mlp_ratio : float, default=4.0
+        Expansion ratio for the MLP hidden dimension.
+    qkv_bias : bool, default=True
+        If True, add bias to QKV projections.
+    proj_drop : float, default=0.0
+        Dropout applied to MLP and attention projections.
+    attn_drop : float, default=0.0
+        Dropout applied to attention weights.
+    drop_path : float, default=0.0
+        Stochastic depth rate.
+    """
+
     def __init__(
         self,
         dim: int,
@@ -259,6 +353,19 @@ class SwinLiteBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the Swin block to a channels-first tensor.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, channels, *spatial_dims).
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor with the same shape as the input.
+        """
         # x shape: [B, C, *spatial]
         spatial_dims = x.ndim - 2
         if spatial_dims != self.spatial_dims:
@@ -288,13 +395,52 @@ class SwinLiteBlock(nn.Module):
         return x
 
     def compute_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the feature map size produced by this block.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         return int(3 * np.prod([self.dim, *input_size], dtype=np.int64))
 
     def compute_conv_max_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the largest activation tensor size for this block.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate maximum activation size.
+        """
         # Transformer block proxy: largest activation tensor has shape [C, *spatial].
         return int(np.prod([self.dim, *input_size], dtype=np.int64))
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for one Swin block.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for the block.
+        """
         attn_flops = self.attn.compute_approx_flops(input_size, self.window_size)
         n_tokens = int(np.prod(input_size, dtype=np.int64))
         mlp_macs = _linear_macs(n_tokens, self.dim, self.hidden_dim) + _linear_macs(
@@ -304,6 +450,31 @@ class SwinLiteBlock(nn.Module):
 
 
 class SwinLiteStage(nn.Module):
+    """
+    A stack of SwinLiteBlock modules.
+
+    Parameters
+    ----------
+    dim : int
+        Feature dimension for all blocks in the stage.
+    depth : int
+        Number of Swin blocks.
+    num_heads : int
+        Number of attention heads per block.
+    window_size : tuple of int
+        Spatial window size used by the blocks.
+    mlp_ratio : float, default=4.0
+        Expansion ratio for the block MLPs.
+    qkv_bias : bool, default=True
+        If True, add bias to QKV projections.
+    proj_drop : float, default=0.0
+        Dropout applied to projections.
+    attn_drop : float, default=0.0
+        Dropout applied to attention weights.
+    drop_path_rates : list of float, optional
+        Per-block stochastic depth rates.
+    """
+
     def __init__(
         self,
         dim: int,
@@ -343,23 +514,75 @@ class SwinLiteStage(nn.Module):
         self.blocks = nn.ModuleList(blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply all blocks in the stage sequentially.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, channels, *spatial_dims).
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor with the same shape as the input.
+        """
         for block in self.blocks:
             x = block(x)
         return x
 
     def compute_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the accumulated feature map size for the stage.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         output = 0
         for block in self.blocks:
             output += block.compute_feature_map_size(input_size)
         return int(output)
 
     def compute_conv_max_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the largest activation tensor size for the stage.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate maximum activation size.
+        """
         output = 0
         for block in self.blocks:
             output = max(output, int(block.compute_conv_max_size(input_size)))
         return int(output)
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for the full stage.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for the stage.
+        """
         output = 0
         for block in self.blocks:
             output += block.compute_approx_flops(input_size)
@@ -367,6 +590,19 @@ class SwinLiteStage(nn.Module):
 
 
 class SqueezeExcitationNd(nn.Module):
+    """
+    Squeeze-and-excitation block for N-D convolutional tensors.
+
+    Parameters
+    ----------
+    channels : int
+        Number of input and output channels.
+    conv_op : Type[_ConvNd]
+        Convolution operator used for the excitation layers.
+    reduction : int, default=4
+        Channel reduction factor.
+    """
+
     def __init__(self, channels: int, conv_op: Type[_ConvNd], reduction: int = 4):
         super().__init__()
         reduced = max(1, channels // reduction)
@@ -377,6 +613,19 @@ class SqueezeExcitationNd(nn.Module):
         self.gate = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply squeeze-and-excitation gating.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Reweighted tensor.
+        """
         y = self.pool(x)
         y = self.fc1(y)
         y = self.act(y)
@@ -386,6 +635,25 @@ class SqueezeExcitationNd(nn.Module):
 
 
 class LiteModule(nn.Module):
+    """
+    Lightweight convolutional refinement module with expansion, depthwise mixing and SE.
+
+    Parameters
+    ----------
+    channels : int
+        Number of input and output channels.
+    conv_op : Type[_ConvNd]
+        Convolution operator used throughout the module.
+    expansion_ratio : float, default=2.0
+        Channel expansion ratio in the hidden branch.
+    se_reduction : int, default=4
+        Reduction factor for squeeze-excitation.
+    kernel_size_large : int, default=7
+        Kernel size of the larger depthwise branch.
+    kernel_size_small : int, default=3
+        Kernel size of the smaller depthwise branch.
+    """
+
     def __init__(
         self,
         channels: int,
@@ -438,6 +706,19 @@ class LiteModule(nn.Module):
         self.out_act = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply the Lite module.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor with the same channel count as the input.
+        """
         residual = x
 
         x = self.expand(x)
@@ -457,17 +738,56 @@ class LiteModule(nn.Module):
         return x
 
     def compute_conv_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the feature map size generated by the module.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         hidden = np.prod([self.hidden_channels, *input_size], dtype=np.int64)
         output = np.prod([self.project.out_channels, *input_size], dtype=np.int64)
         # pointwise expand + two depthwise branches + pointwise project
         return int(3 * hidden + output)
 
     def compute_conv_max_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the largest activation tensor inside the module.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate maximum activation size.
+        """
         hidden = np.prod([self.hidden_channels, *input_size], dtype=np.int64)
         output = np.prod([self.project.out_channels, *input_size], dtype=np.int64)
         return int(max(hidden, output))
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for the module.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for the module.
+        """
         volume = int(np.prod(input_size, dtype=np.int64))
 
         macs_expand = _conv_nd_macs_from_module(self.expand, input_size)
@@ -482,6 +802,49 @@ class LiteModule(nn.Module):
 
 
 class LiteSwinEncoder(nn.Module):
+    """
+    Hierarchical encoder composed of strided convolutions, optional Lite modules and Swin stages.
+
+    Parameters
+    ----------
+    input_channels : int
+        Number of input channels.
+    n_stages : int
+        Number of encoder stages.
+    features_per_stage : int or list or tuple
+        Number of channels per stage.
+    conv_op : Type[_ConvNd]
+        Convolution operator used throughout the encoder.
+    kernel_sizes : int or list or tuple
+        Kernel sizes for the encoder stages.
+    strides : int or list or tuple
+        Strides for the encoder stages.
+    stage_depths : int or list or tuple, optional
+        Number of Swin blocks per stage.
+    num_heads : int or list or tuple, optional
+        Attention heads per stage.
+    window_size : int or list or tuple, default=7
+        Attention window size.
+    return_skips : bool, default=True
+        If True, return all stage outputs for skip connections.
+    mlp_ratio : float, default=4.0
+        Expansion ratio used in transformer blocks.
+    qkv_bias : bool, default=True
+        If True, add bias to QKV projections.
+    drop_path_rate : float, default=0.0
+        Maximum stochastic depth rate.
+    proj_drop_rate : float, default=0.0
+        Dropout applied to attention and MLP projections.
+    attn_drop_rate : float, default=0.0
+        Dropout applied to attention weights.
+    encoder_lite_modules_per_stage : int or list or tuple, optional
+        Number of Lite modules per stage.
+    lite_expansion_ratio : float, default=2.0
+        Channel expansion ratio used by Lite modules.
+    lite_se_reduction : int, default=4
+        Reduction factor used by squeeze-excitation blocks.
+    """
+
     def __init__(
         self,
         input_channels: int,
@@ -666,6 +1029,19 @@ class LiteSwinEncoder(nn.Module):
         return int((3 * hidden_size + out_size) * count)
 
     def forward(self, x: torch.Tensor):
+        """
+        Run the encoder and collect skip features.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, channels, *spatial_dims).
+
+        Returns
+        -------
+        list[torch.Tensor] or torch.Tensor
+            Skip tensors if return_skips is True, otherwise the final stage output.
+        """
         skips = []
 
         x = self.stem(x)
@@ -683,6 +1059,19 @@ class LiteSwinEncoder(nn.Module):
         return skips[-1]
 
     def compute_conv_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the total feature map size across the encoder.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         if len(input_size) != self.spatial_dims:
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -715,6 +1104,19 @@ class LiteSwinEncoder(nn.Module):
         return int(output)
 
     def compute_conv_max_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the largest activation tensor across the encoder.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate maximum activation size.
+        """
         if len(input_size) != self.spatial_dims:
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -739,6 +1141,19 @@ class LiteSwinEncoder(nn.Module):
         return int(max_size)
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for the encoder.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for the encoder.
+        """
         if len(input_size) != self.spatial_dims:
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -764,6 +1179,25 @@ class LiteSwinEncoder(nn.Module):
 
 
 class LiteSwinUNETRDecoder(nn.Module):
+    """
+    Decoder that upsamples encoder features with transpose convolutions and Lite modules.
+
+    Parameters
+    ----------
+    encoder : LiteSwinEncoder
+        Encoder that provides the skip features.
+    num_classes : int
+        Number of output classes.
+    deep_supervision : bool
+        If True, produce segmentation outputs at all decoder stages.
+    lite_modules_per_stage : int or list or tuple, default=1
+        Number of Lite modules per decoder stage.
+    lite_expansion_ratio : float, default=2.0
+        Channel expansion ratio used by Lite modules.
+    lite_se_reduction : int, default=4
+        Reduction factor used by squeeze-excitation blocks.
+    """
+
     def __init__(
         self,
         encoder: LiteSwinEncoder,
@@ -862,6 +1296,19 @@ class LiteSwinUNETRDecoder(nn.Module):
         return int((3 * hidden_size + out_size) * count)
 
     def forward(self, skips: List[torch.Tensor]):
+        """
+        Decode a list of skip tensors into segmentation outputs.
+
+        Parameters
+        ----------
+        skips : list[torch.Tensor]
+            Skip tensors returned by the encoder, ordered from high to low resolution.
+
+        Returns
+        -------
+        torch.Tensor or list[torch.Tensor]
+            Segmentation output, optionally with deep supervision outputs.
+        """
         lres_input = skips[-1]
         seg_outputs = []
 
@@ -884,6 +1331,19 @@ class LiteSwinUNETRDecoder(nn.Module):
         return seg_outputs
 
     def compute_conv_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the total feature map size across the decoder.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         current_size = list(input_size)
         stage_sizes = []
         for s in range(len(self.encoder.strides)):
@@ -914,6 +1374,19 @@ class LiteSwinUNETRDecoder(nn.Module):
         return int(output)
 
     def compute_conv_max_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the largest activation tensor across the decoder.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate maximum activation size.
+        """
         current_size = list(input_size)
         stage_sizes = []
         for s in range(len(self.encoder.strides)):
@@ -939,6 +1412,19 @@ class LiteSwinUNETRDecoder(nn.Module):
         return int(max_size)
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for the decoder.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for the decoder.
+        """
         current_size = list(input_size)
         stage_sizes = []
         for s in range(len(self.encoder.strides)):

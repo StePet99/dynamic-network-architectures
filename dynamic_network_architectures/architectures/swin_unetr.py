@@ -26,6 +26,56 @@ __author__ = ["Stefano Petraccini", "GitHub Copilot"]
 
 
 class LiteSwinUNETR(AbstractDynamicNetworkArchitectures):
+    """
+    Swin-UNETR style architecture with a Lite Swin encoder and Lite decoder blocks.
+
+    This variant keeps the hierarchical transformer backbone but augments both encoder
+    and decoder stages with Lite modules for local convolutional refinement.
+
+    Parameters
+    ----------
+    input_channels : int
+        Number of input channels.
+    n_stages : int
+        Number of encoder stages.
+    features_per_stage : int or list or tuple
+        Number of channels per stage.
+    conv_op : Type[_ConvNd]
+        Convolution operator used throughout the network.
+    kernel_sizes : int or list or tuple
+        Kernel sizes for the encoder stages.
+    strides : int or list or tuple
+        Strides for the encoder stages.
+    num_classes : int
+        Number of output segmentation classes.
+    deep_supervision : bool, default=False
+        If True, return auxiliary segmentation outputs from decoder stages.
+    stage_depths : int or list or tuple, optional
+        Number of Swin blocks per stage.
+    num_heads : int or list or tuple, optional
+        Attention heads per stage.
+    window_size : int or list or tuple, default=7
+        Window size for local self-attention.
+    mlp_ratio : float, default=4.0
+        Expansion ratio used in the transformer MLP.
+    qkv_bias : bool, default=True
+        If True, use bias in QKV projections.
+    drop_path_rate : float, default=0.0
+        Maximum stochastic depth rate.
+    proj_drop_rate : float, default=0.0
+        Dropout applied to attention and MLP projections.
+    attn_drop_rate : float, default=0.0
+        Dropout applied to attention weights.
+    encoder_lite_modules_per_stage : int or list or tuple, optional
+        Number of Lite modules per encoder stage.
+    decoder_lite_modules_per_stage : int or list or tuple, default=1
+        Number of Lite modules per decoder stage.
+    lite_expansion_ratio : float, default=2.0
+        Channel expansion ratio inside Lite modules.
+    lite_se_reduction : int, default=4
+        Reduction factor used by squeeze-excitation blocks.
+    """
+
     def __init__(
         self,
         input_channels: int,
@@ -103,10 +153,36 @@ class LiteSwinUNETR(AbstractDynamicNetworkArchitectures):
         )
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass of the network.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, channels, *spatial_dims).
+
+        Returns
+        -------
+        torch.Tensor or list[torch.Tensor]
+            Decoder output, optionally with deep supervision heads.
+        """
         skips = self.encoder(x)
         return self.decoder(skips)
 
     def compute_conv_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the total convolutional feature map size for the network.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         if len(input_size) != convert_conv_op_to_dim(self.encoder.conv_op):
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -117,6 +193,19 @@ class LiteSwinUNETR(AbstractDynamicNetworkArchitectures):
         )
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for a single sample.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for one sample.
+        """
         if len(input_size) != convert_conv_op_to_dim(self.encoder.conv_op):
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -125,10 +214,33 @@ class LiteSwinUNETR(AbstractDynamicNetworkArchitectures):
         return int(self.encoder.compute_approx_flops(input_size) + self.decoder.compute_approx_flops(input_size))
 
     def estimate_computational_cost(self, input_size: Union[List[int], Tuple[int, ...]], batch_size: int = 1) -> dict:
+        """
+        Estimate FLOPs and MACs for the network.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+        batch_size : int, default=1
+            Batch size used to scale per-sample estimates.
+
+        Returns
+        -------
+        dict
+            Dictionary with approximate FLOPs and MACs.
+        """
         return estimate_cost_from_flops(self.compute_approx_flops(input_size), batch_size=batch_size)
 
     @staticmethod
     def initialize(module: nn.Module):
+        """
+        Initialize network modules with standard Swin/UNet defaults.
+
+        Parameters
+        ----------
+        module : nn.Module
+            Module to initialize.
+        """
         if isinstance(
             module,
             (
@@ -161,6 +273,43 @@ class SwinUNETR(AbstractDynamicNetworkArchitectures):
     This class is intentionally distinct from LiteSwinUNETR:
     - LiteSwinUNETR uses Lite modules in encoder/decoder stages.
     - SwinUNETR disables Lite modules and uses a convolutional UNetDecoder.
+
+    Parameters
+    ----------
+    input_channels : int
+        Number of input channels.
+    n_stages : int
+        Number of encoder stages.
+    features_per_stage : int or list or tuple
+        Number of channels per stage.
+    conv_op : Type[_ConvNd]
+        Convolution operator used throughout the network.
+    kernel_sizes : int or list or tuple
+        Kernel sizes for the encoder stages.
+    strides : int or list or tuple
+        Strides for the encoder stages.
+    num_classes : int
+        Number of output segmentation classes.
+    deep_supervision : bool, default=False
+        If True, return auxiliary segmentation outputs from decoder stages.
+    stage_depths : int or list or tuple, optional
+        Number of Swin blocks per stage.
+    num_heads : int or list or tuple, optional
+        Attention heads per stage.
+    window_size : int or list or tuple, default=7
+        Window size for local self-attention.
+    mlp_ratio : float, default=4.0
+        Expansion ratio used in the transformer MLP.
+    qkv_bias : bool, default=True
+        If True, use bias in QKV projections.
+    drop_path_rate : float, default=0.0
+        Maximum stochastic depth rate.
+    proj_drop_rate : float, default=0.0
+        Dropout applied to attention and MLP projections.
+    attn_drop_rate : float, default=0.0
+        Dropout applied to attention weights.
+    n_conv_per_stage_decoder : int or list or tuple, default=2
+        Number of convolution blocks per decoder stage.
     """
 
     def __init__(
@@ -249,10 +398,36 @@ class SwinUNETR(AbstractDynamicNetworkArchitectures):
         )
 
     def forward(self, x: torch.Tensor):
+        """
+        Forward pass of the network.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape (batch_size, channels, *spatial_dims).
+
+        Returns
+        -------
+        torch.Tensor or list[torch.Tensor]
+            Decoder output, optionally with deep supervision heads.
+        """
         skips = self.encoder(x)
         return self.decoder(skips)
 
     def compute_conv_feature_map_size(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the total convolutional feature map size for the network.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate feature map size.
+        """
         if len(input_size) != convert_conv_op_to_dim(self.encoder.conv_op):
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -263,6 +438,19 @@ class SwinUNETR(AbstractDynamicNetworkArchitectures):
         )
 
     def compute_approx_flops(self, input_size: Union[List[int], Tuple[int, ...]]) -> int:
+        """
+        Estimate the approximate FLOPs for a single sample.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+
+        Returns
+        -------
+        int
+            Approximate FLOPs for one sample.
+        """
         if len(input_size) != convert_conv_op_to_dim(self.encoder.conv_op):
             raise AssertionError(
                 "just give the image size without color/feature channels or batch channel. "
@@ -274,10 +462,33 @@ class SwinUNETR(AbstractDynamicNetworkArchitectures):
         return int(self.encoder.compute_approx_flops(input_size) + decoder_flops)
 
     def estimate_computational_cost(self, input_size: Union[List[int], Tuple[int, ...]], batch_size: int = 1) -> dict:
+        """
+        Estimate FLOPs and MACs for the network.
+
+        Parameters
+        ----------
+        input_size : list or tuple
+            Spatial input size without batch or channel dimensions.
+        batch_size : int, default=1
+            Batch size used to scale per-sample estimates.
+
+        Returns
+        -------
+        dict
+            Dictionary with approximate FLOPs and MACs.
+        """
         return estimate_cost_from_flops(self.compute_approx_flops(input_size), batch_size=batch_size)
 
     @staticmethod
     def initialize(module: nn.Module):
+        """
+        Initialize network modules with standard Swin/UNet defaults.
+
+        Parameters
+        ----------
+        module : nn.Module
+            Module to initialize.
+        """
         if isinstance(
             module,
             (
