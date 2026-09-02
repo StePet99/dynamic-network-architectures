@@ -22,7 +22,7 @@ from dynamic_network_architectures.building_blocks.swin_unetr_blocks import (
 from dynamic_network_architectures.building_blocks.unet_decoder import UNetDecoder
 
 
-__author__ = ["Stefano Petraccini", "GitHub Copilot"]
+__author__ = ["Stefano Petraccini"]
 
 
 class LiteSwinUNETR(AbstractDynamicNetworkArchitectures):
